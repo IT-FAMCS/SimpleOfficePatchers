@@ -1,14 +1,6 @@
-# This workflow will build a .NET project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-net
-
 name: built wasm artifacts (_framework)
 
-on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-  workflow_dispatch:
+on: [push, workflow_dispatch]
 
 jobs:
   build:
@@ -28,5 +20,6 @@ jobs:
     - name: upload the _framework folder
       uses: actions/upload-artifact@v4.6.2
       with:
+        name: _framework
         path: bin/Release/net9.0/browser-wasm/AppBundle/_framework
       
