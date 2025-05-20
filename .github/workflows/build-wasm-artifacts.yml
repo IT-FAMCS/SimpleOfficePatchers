@@ -1,0 +1,33 @@
+name: Build WASM artifacts
+
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 9.0.x
+    - name: Install wasm-tools and wasm-experimental workloads
+      run: |
+        dotnet workload install wasm-tools
+        dotnet workload install wasm-experimental
+    - name: Restore dependencies
+      run: dotnet restore
+    - name: Build
+      run: dotnet build -c Release --no-restore
+    - name: Copy the _framework folder
+      run: |
+        mkdir output
+        mv bin/Release/net9.0/browser-wasm/AppBundle/_framework output
+    - name: Upload the _framework folder
+      uses: actions/upload-artifact@v4.6.2
+      with:
+        name: _framework
+        path: output/
+      
