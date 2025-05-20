@@ -1,4 +1,4 @@
-name: built wasm artifacts (_framework)
+name: Build WASM artifacts (_framework)
 
 on: [push, workflow_dispatch]
 
@@ -9,15 +9,19 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: setup .NET
+    - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 9.0.x
-    - name: restore dependencies
+    - name: Install wasm-tools and wasm-experimental workloads
+      run: |
+        dotnet workload install wasm-tools
+        dotnet workload install wasm-experimental
+    - name: Restore dependencies
       run: dotnet restore
-    - name: build
+    - name: Build
       run: dotnet build --no-restore
-    - name: upload the _framework folder
+    - name: Upload the _framework folder
       uses: actions/upload-artifact@v4.6.2
       with:
         name: _framework
