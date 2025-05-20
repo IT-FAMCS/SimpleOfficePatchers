@@ -21,9 +21,13 @@ jobs:
       run: dotnet restore
     - name: Build
       run: dotnet build -c Release --no-restore
+    - name: Copy the _framework folder
+      run: |
+        mkdir output
+        mv bin/Release/net9.0/browser-wasm/AppBundle/_framework output
     - name: Upload the _framework folder
       uses: actions/upload-artifact@v4.6.2
       with:
         name: _framework
-        path: bin/Release/net9.0/browser-wasm/AppBundle/_framework/
+        path: output/
       
