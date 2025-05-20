@@ -10,7 +10,7 @@ public record WordListPatch(List<WordTextPatch> Patches);
 public class WordPatches
 {
     public Dictionary<string, WordTextPatch> Text { get; set; }
-    public List<WordListPatch> List { get; set; }
+    public Dictionary<string, WordListPatch> List { get; set; }
 }
 
 [JsonSourceGenerationOptions(WriteIndented = true, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]

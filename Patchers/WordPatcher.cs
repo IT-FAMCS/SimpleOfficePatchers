@@ -1,5 +1,6 @@
 ﻿#nullable enable
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices.JavaScript;
@@ -23,41 +24,69 @@ public partial class WordPatcher
         var document = WordprocessingDocument.Open(stream, true);
 
         foreach (var (placeholder, patch) in patches.Text)
-            ApplyTextPatch(ref document,
-                FindParagraphWithPlaceholder(document, placeholder), patch);
+            ApplyTextPatch(document,
+                FindParagraphsWithPlaceholder(document, placeholder), patch);
+        foreach (var (placeholder, patch) in patches.List)
+            ApplyListPatch(document, FindParagraphsWithPlaceholder(document, placeholder), patch);
 
         document.Dispose();
         return stream.ToArray();
     }
 
-    private record PlaceholderInformation(int Location, (int, int) RunIndices, Paragraph SourceParagraph);
+    private record PlaceholderInformation((int, int) RunIndices, Paragraph SourceParagraph);
 
-    private static void ApplyTextPatch(ref WordprocessingDocument document,
-        PlaceholderInformation? placeholderInformation,
+    private static void ApplyListPatch(WordprocessingDocument document,
+        List<PlaceholderInformation>? placeholderInformations,
+        WordListPatch patch)
+    {
+        if (patch.Patches.Count == 0) return;
+        var body = document.MainDocumentPart?.Document.Body;
+        ArgumentNullException.ThrowIfNull(placeholderInformations);
+        ArgumentNullException.ThrowIfNull(body);
+
+        foreach (var placeholderInformation in placeholderInformations)
+        {
+            var updatedFirstParagraph = ReplaceParagraphText(placeholderInformation, patch.Patches.First().Text);
+            body.ReplaceChild(updatedFirstParagraph, placeholderInformation.SourceParagraph);
+
+            foreach (var text in patch.Patches.Skip(1).Reverse().Select(p => p.Text))
+            {
+                var newParagraph = ReplaceParagraphText(placeholderInformation, text);
+                body.InsertAfter(newParagraph, updatedFirstParagraph);
+            }
+        }
+    }
+
+    private static void ApplyTextPatch(WordprocessingDocument document,
+        List<PlaceholderInformation>? placeholderInformations,
         WordTextPatch patch)
     {
         var body = document.MainDocumentPart?.Document.Body;
-        ArgumentNullException.ThrowIfNull(placeholderInformation);
+        ArgumentNullException.ThrowIfNull(placeholderInformations);
         ArgumentNullException.ThrowIfNull(body);
 
-        var newParagraph = ReplaceParagraphText(placeholderInformation, patch.Text);
-        body.ReplaceChild(newParagraph, placeholderInformation.SourceParagraph);
+        foreach (var placeholderInformation in placeholderInformations)
+        {
+            var newParagraph = ReplaceParagraphText(placeholderInformation, patch.Text);
+            body.ReplaceChild(newParagraph, placeholderInformation.SourceParagraph);
+        }
     }
 
-    private static PlaceholderInformation? FindParagraphWithPlaceholder(WordprocessingDocument document,
+    private static List<PlaceholderInformation> FindParagraphsWithPlaceholder(WordprocessingDocument document,
         string placeholder)
     {
         var body = document.MainDocumentPart?.Document.Body;
-        if (body is null) return null;
+        ArgumentNullException.ThrowIfNull(body);
 
-        foreach (var (index, child) in body.ChildElements.Index())
+        var result = new List<PlaceholderInformation>();
+        foreach (var child in body.ChildElements)
         {
             var completePlaceholder = $"{{{{{placeholder}}}}}";
             if (child is Paragraph paragraph && paragraph.InnerText.Contains(completePlaceholder))
-                return new PlaceholderInformation(index, FindRunIndices(paragraph, completePlaceholder), paragraph);
+                result.Add(new PlaceholderInformation(FindRunIndices(paragraph, completePlaceholder), paragraph));
         }
 
-        return null;
+        return result;
     }
 
     private static Paragraph ReplaceParagraphText(PlaceholderInformation placeholderInformation, string with)
