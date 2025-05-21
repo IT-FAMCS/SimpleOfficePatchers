@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices.JavaScript;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
 using SimpleOfficePatchers.Models;
@@ -14,13 +15,13 @@ namespace SimpleOfficePatchers.Patchers;
 public partial class WordPatcher
 {
     [JSExport]
-    public static byte[] PatchDocument(byte[] bytes, string serializedPatches)
+    public static byte[] PatchDocument(byte[] documentBytes, string serializedPatches)
     {
         var patches =
             JsonSerializer.Deserialize(serializedPatches, WordPatchesContext.Default.WordPatches);
         ArgumentNullException.ThrowIfNull(patches);
         var stream = new MemoryStream();
-        stream.Write(bytes);
+        stream.Write(documentBytes);
         var document = WordprocessingDocument.Open(stream, true);
 
         foreach (var (placeholder, patch) in patches.Text)
@@ -33,18 +34,51 @@ public partial class WordPatcher
         return stream.ToArray();
     }
 
+    [JSExport]
+    public static string ExtractPlaceholders(byte[] documentBytes)
+    {
+        using var document = WordprocessingDocument.Open(new MemoryStream(documentBytes), false);
+        var body = document.MainDocumentPart?.Document.Body;
+        ArgumentNullException.ThrowIfNull(body);
+
+        var textMatches = TextPlaceholderRegex().Matches(body.InnerText);
+        var listMatches = ListPlaceholderRegex().Matches(body.InnerText);
+
+        var duplicatePlaceholders = textMatches
+            .Where(tm => listMatches.Any(lm => lm.Groups[1].Value == tm.Groups[1].Value))
+            .Select(m => m.Groups[1].Value).ToList();
+        if (duplicatePlaceholders.Count != 0)
+            throw new Exception(
+                $"duplicate (both text and list types) placeholders found: {string.Join(", ", duplicatePlaceholders)}");
+
+        var placeholders = (from textMatch in textMatches
+                let name = textMatch.Groups[1].Value
+                let description = textMatch.Groups[2].Value
+                select new WordPlaceholder(textMatch.Value, name, description.Trim(), false))
+            .DistinctBy(m => m.Raw)
+            .ToList();
+        placeholders.AddRange((from listMatch in listMatches
+                let name = listMatch.Groups[1].Value
+                let description = listMatch.Groups[2].Value
+                select new WordPlaceholder(listMatch.Value, name, description.Trim(), true))
+            .DistinctBy(m => m.Raw));
+
+        return JsonSerializer.Serialize(placeholders,
+            WordPlaceholderContext.Default.ListWordPlaceholder);
+    }
+
     private record PlaceholderInformation((int, int) RunIndices, Paragraph SourceParagraph);
 
     private static void ApplyListPatch(WordprocessingDocument document,
-        List<PlaceholderInformation>? placeholderInformations,
+        List<PlaceholderInformation>? placeholdersInformation,
         WordListPatch patch)
     {
         if (patch.Patches.Count == 0) return;
         var body = document.MainDocumentPart?.Document.Body;
-        ArgumentNullException.ThrowIfNull(placeholderInformations);
+        ArgumentNullException.ThrowIfNull(placeholdersInformation);
         ArgumentNullException.ThrowIfNull(body);
 
-        foreach (var placeholderInformation in placeholderInformations)
+        foreach (var placeholderInformation in placeholdersInformation)
         {
             var updatedFirstParagraph = ReplaceParagraphText(placeholderInformation, patch.Patches.First().Text);
             body.ReplaceChild(updatedFirstParagraph, placeholderInformation.SourceParagraph);
@@ -58,14 +92,14 @@ public partial class WordPatcher
     }
 
     private static void ApplyTextPatch(WordprocessingDocument document,
-        List<PlaceholderInformation>? placeholderInformations,
+        List<PlaceholderInformation>? placeholdersInformation,
         WordTextPatch patch)
     {
         var body = document.MainDocumentPart?.Document.Body;
-        ArgumentNullException.ThrowIfNull(placeholderInformations);
+        ArgumentNullException.ThrowIfNull(placeholdersInformation);
         ArgumentNullException.ThrowIfNull(body);
 
-        foreach (var placeholderInformation in placeholderInformations)
+        foreach (var placeholderInformation in placeholdersInformation)
         {
             var newParagraph = ReplaceParagraphText(placeholderInformation, patch.Text);
             body.ReplaceChild(newParagraph, placeholderInformation.SourceParagraph);
@@ -81,9 +115,8 @@ public partial class WordPatcher
         var result = new List<PlaceholderInformation>();
         foreach (var child in body.ChildElements)
         {
-            var completePlaceholder = $"{{{{{placeholder}}}}}";
-            if (child is Paragraph paragraph && paragraph.InnerText.Contains(completePlaceholder))
-                result.Add(new PlaceholderInformation(FindRunIndices(paragraph, completePlaceholder), paragraph));
+            if (child is Paragraph paragraph && paragraph.InnerText.Contains(placeholder))
+                result.Add(new PlaceholderInformation(FindRunIndices(paragraph, placeholder), paragraph));
         }
 
         return result;
@@ -143,4 +176,10 @@ public partial class WordPatcher
 
         return (currentStart, currentEnd);
     }
+
+    [GeneratedRegex(@"\{\{\s*([a-zA-Z0-9\-_]+)\s*(?::([^{}]*))?\s*\}\}")]
+    private static partial Regex TextPlaceholderRegex();
+
+    [GeneratedRegex(@"\[\[\s*([a-zA-Z0-9\-_]+)\s*(?::([^{}]*))?\s*\]\]")]
+    private static partial Regex ListPlaceholderRegex();
 }
