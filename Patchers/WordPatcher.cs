@@ -31,7 +31,7 @@ public partial class WordPatcher
             ApplyTextPatch(document,
                 FindParagraphsWithPlaceholder(document, placeholder), patch);
         foreach (var (placeholder, patch) in patches.List ?? [])
-            ApplyListPatch(document, FindParagraphsWithPlaceholder(document, placeholder), patch);
+            ApplyListPatch(document, FindParagraphsWithPlaceholder(document, placeholder, "list"), patch);
         foreach (var (placeholder, patch) in patches.GroupedList ?? [])
             ApplyGroupedListPatch(document, FindParagraphsWithPlaceholder(document, placeholder, "group-title"),
                 FindParagraphsWithPlaceholder(document, placeholder, "group-items"), patch);
@@ -162,8 +162,6 @@ public partial class WordPatcher
                 placeholderInformation.SourceParagraph.ParagraphProperties?.NumberingProperties != null
                     ? CloneNumbering(document, placeholderInformation.SourceParagraph)
                     : -1;
-            Console.WriteLine(
-                $"{placeholderInformation.SourceParagraph.ParagraphProperties?.NumberingProperties?.NumberingId?.Val} -> ${updatedNumberingId}");
             var updatedFirstParagraph =
                 ReplaceParagraphText(placeholderInformation, patch.Items.First().Text, updatedNumberingId);
             body.ReplaceChild(updatedFirstParagraph, placeholderInformation.SourceParagraph);
