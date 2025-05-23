@@ -1,5 +1,4 @@
-﻿#nullable enable
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -10,7 +9,7 @@ using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
 using SimpleOfficePatchers.Extensions;
-using SimpleOfficePatchers.Models;
+using SimpleOfficePatchers.Models.Word;
 
 namespace SimpleOfficePatchers.Patchers;
 
@@ -20,21 +19,14 @@ public partial class WordPatcher
     public static byte[] PatchDocument(byte[] documentBytes, string serializedPatches)
     {
         var patches =
-            JsonSerializer.Deserialize(serializedPatches, WordPatchesContext.Default.WordPatches);
+            JsonSerializer.Deserialize(serializedPatches, WordPatchContext.Default.DictionaryStringWordPatch);
         ArgumentNullException.ThrowIfNull(patches);
         var stream = new MemoryStream();
         stream.Write(documentBytes);
 
         var document = WordprocessingDocument.Open(stream, true);
-
-        foreach (var (placeholder, patch) in patches.Text ?? [])
-            ApplyTextPatch(document,
-                FindParagraphsWithPlaceholder(document, placeholder), patch);
-        foreach (var (placeholder, patch) in patches.List ?? [])
-            ApplyListPatch(document, FindParagraphsWithPlaceholder(document, placeholder, "list"), patch);
-        foreach (var (placeholder, patch) in patches.GroupedList ?? [])
-            ApplyGroupedListPatch(document, FindParagraphsWithPlaceholder(document, placeholder, "group-title"),
-                FindParagraphsWithPlaceholder(document, placeholder, "group-items"), patch);
+        foreach (var (key, patch) in patches)
+            ApplyPatch(document, key, patch);
 
         document.Dispose();
         return stream.ToArray();
@@ -103,12 +95,37 @@ public partial class WordPatcher
         }
     }
 
-    private record PlaceholderMatch(string Attribute, string Raw, string Name, string Description);
 
-    private record PlaceholderInformation((int, int) RunIndices, Paragraph SourceParagraph);
+    private static void ApplyPatch(WordprocessingDocument document, string key, WordPatch patch)
+    {
+        switch (patch.Type)
+        {
+            case WordPlaceholderType.Text:
+            {
+                var discriminatedPatch = (WordTextPatch)patch;
+                ApplyTextPatch(document, FindParagraphsWithPlaceholder(document, key), discriminatedPatch);
+                break;
+            }
+            case WordPlaceholderType.List:
+            {
+                var discriminatedPatch = (WordListPatch)patch;
+                ApplyListPatch(document, FindParagraphsWithPlaceholder(document, key, "list"), discriminatedPatch);
+                break;
+            }
+            case WordPlaceholderType.GroupedList:
+            {
+                var discriminatedPatch = (WordGroupListPatch)patch;
+                ApplyGroupedListPatch(document, FindParagraphsWithPlaceholder(document, key, "group-title"),
+                    FindParagraphsWithPlaceholder(document, key, "group-items"), discriminatedPatch);
+                break;
+            }
+            default:
+                throw new ArgumentOutOfRangeException();
+        }
+    }
 
     private static void ApplyGroupedListPatch(WordprocessingDocument document,
-        List<PlaceholderInformation>? titlePlaceholders, List<PlaceholderInformation>? itemsPlaceholders,
+        List<PlaceholderInformation> titlePlaceholders, List<PlaceholderInformation> itemsPlaceholders,
         WordGroupListPatch patch)
     {
         if (patch.Groups.Count == 0) return;
@@ -131,10 +148,11 @@ public partial class WordPatcher
                 var itemsIdentifier = TemporaryGroupedListPlaceholder("items", groupIndex);
                 var titleIdentifier = TemporaryGroupedListPlaceholder("title", groupIndex);
 
-                body.InsertAfter(ReplaceParagraphText(itemsPlaceholder, $"{{{{{itemsIdentifier}}}}}"), parent);
+                body.InsertAfter(ReplaceParagraphText(itemsPlaceholder, $"{{{{@list {itemsIdentifier}}}}}"), parent);
                 body.InsertAfter(ReplaceParagraphText(titlePlaceholder, $"{{{{{titleIdentifier}}}}}"), parent);
 
-                ApplyListPatch(document, FindParagraphsWithPlaceholder(document, itemsIdentifier), group.List);
+                ApplyListPatch(document, FindParagraphsWithPlaceholder(document, itemsIdentifier),
+                    new WordListPatch(null, group.Items));
                 ApplyTextPatch(document, FindParagraphsWithPlaceholder(document, titleIdentifier), group.Title);
             }
 
@@ -144,12 +162,14 @@ public partial class WordPatcher
 
         return;
 
-        string TemporaryGroupedListPlaceholder(string purpose, int index) =>
-            $"__grouped_list_${index}_{purpose}__";
+        string TemporaryGroupedListPlaceholder(string purpose, int index)
+        {
+            return $"__grouped_list_${index}_{purpose}__";
+        }
     }
 
     private static void ApplyListPatch(WordprocessingDocument document,
-        List<PlaceholderInformation>? placeholdersInformation,
+        List<PlaceholderInformation> placeholdersInformation,
         WordListPatch patch)
     {
         if (patch.Items.Count == 0) return;
@@ -158,27 +178,73 @@ public partial class WordPatcher
         var body = document.GetBodyOrThrow();
         foreach (var placeholderInformation in placeholdersInformation)
         {
-            var updatedNumberingId =
-                placeholderInformation.SourceParagraph.ParagraphProperties?.NumberingProperties != null
-                    ? CloneNumbering(document, placeholderInformation.SourceParagraph)
-                    : -1;
-            var updatedFirstParagraph =
-                ReplaceParagraphText(placeholderInformation, patch.Items.First().Text, updatedNumberingId);
-            body.ReplaceChild(updatedFirstParagraph, placeholderInformation.SourceParagraph);
+            var parent = placeholderInformation.SourceParagraph;
+            var numbering = CloneNumbering(document, parent);
+            ArgumentNullException.ThrowIfNull(numbering); // TODO: provide more information
 
-            foreach (var text in patch.Items.Skip(1).Reverse().Select(p => p.Text))
-            {
-                var newParagraph = ReplaceParagraphText(placeholderInformation, text, updatedNumberingId);
-                if (updatedNumberingId != -1 && newParagraph.ParagraphProperties?.NumberingProperties != null)
-                    newParagraph.ParagraphProperties.NumberingProperties.NumberingId =
-                        new NumberingId { Val = updatedNumberingId };
-                body.InsertAfter(newParagraph, updatedFirstParagraph);
-            }
+            foreach (var (index, item) in patch.Items.AsEnumerable().Reverse().Index())
+                switch (item.Type)
+                {
+                    case WordPlaceholderType.Text:
+                    {
+                        var discriminatedItem = (WordTextPatch)item;
+
+                        var newParagraph =
+                            ReplaceParagraphText(placeholderInformation, discriminatedItem.Text, numbering);
+                        body.InsertAfter(newParagraph, parent);
+                        break;
+                    }
+                    case WordPlaceholderType.List:
+                    {
+                        var discriminatedItem = (WordListPatch)item;
+
+                        var listIdentifier = TemporaryListPlaceholder(index);
+                        body.InsertAfter(ReplaceParagraphText(placeholderInformation,
+                            $"{{{{@list {listIdentifier}}}}}", numbering with { Level = numbering.Level + 1 }), parent);
+                        ApplyPatch(document, listIdentifier, discriminatedItem);
+
+                        if (discriminatedItem.SublistTitle != null)
+                        {
+                            var sublistTitleParagraph = ReplaceParagraphText(placeholderInformation,
+                                discriminatedItem.SublistTitle.Text, numbering);
+                            body.InsertAfter(sublistTitleParagraph, parent);
+                        }
+
+                        break;
+                    }
+                    case WordPlaceholderType.GroupedList:
+                    {
+                        var discriminatedItem = (WordGroupListPatch)item;
+
+                        var listIdentifier = TemporaryListPlaceholder(index);
+                        body.InsertAfter(
+                            ReplaceParagraphText(placeholderInformation, $"{{{{@group-title {listIdentifier}}}}}",
+                                numbering),
+                            parent);
+                        body.InsertAfter(ReplaceParagraphText(placeholderInformation,
+                                $"{{{{@group-items {listIdentifier}}}}}",
+                                numbering with { Level = numbering.Level + 1 }),
+                            parent);
+                        ApplyPatch(document, listIdentifier, discriminatedItem);
+                        break;
+                    }
+                    default:
+                        throw new ArgumentOutOfRangeException();
+                }
+
+            body.RemoveChild(parent);
+        }
+
+        return;
+
+        string TemporaryListPlaceholder(int index)
+        {
+            return $"__list_${index}__";
         }
     }
 
     private static void ApplyTextPatch(WordprocessingDocument document,
-        List<PlaceholderInformation>? placeholdersInformation,
+        List<PlaceholderInformation> placeholdersInformation,
         WordTextPatch patch)
     {
         ArgumentNullException.ThrowIfNull(placeholdersInformation);
@@ -209,7 +275,7 @@ public partial class WordPatcher
     }
 
     private static Paragraph ReplaceParagraphText(PlaceholderInformation placeholderInformation, string with,
-        int? updateNumberingId = null)
+        NumberingOptions numberingOptions = null)
     {
         var paragraph = (Paragraph)placeholderInformation.SourceParagraph.Clone();
         var (startIndex, endIndex) = placeholderInformation.RunIndices;
@@ -224,18 +290,25 @@ public partial class WordPatcher
         // i have zero idea why but items have to be removed in reverse for this to work
         foreach (var removedRun in removedRuns.Reverse()) removedRun.Remove();
 
-        if (paragraph.ParagraphProperties?.NumberingProperties != null && updateNumberingId != null)
-            paragraph.ParagraphProperties.NumberingProperties.NumberingId = new NumberingId { Val = updateNumberingId };
+        if (numberingOptions != null)
+        {
+            ArgumentNullException.ThrowIfNull(paragraph.ParagraphProperties);
+            paragraph.ParagraphProperties.NumberingProperties = new NumberingProperties
+            {
+                NumberingId = new NumberingId { Val = numberingOptions.Id },
+                NumberingLevelReference = new NumberingLevelReference { Val = numberingOptions.Level }
+            };
+        }
 
         return paragraph;
     }
 
-    private static int CloneNumbering(WordprocessingDocument document, Paragraph source)
+    private static NumberingOptions? CloneNumbering(WordprocessingDocument document, Paragraph source)
     {
         // TODO: perhaps don't throw on every failure 😭
-
         var id = source.ParagraphProperties?.NumberingProperties?.NumberingId?.Val;
-        ArgumentNullException.ThrowIfNull(id);
+        var level = source.ParagraphProperties?.NumberingProperties?.NumberingLevelReference?.Val ?? new Int32Value(0);
+        if (id == null) return null;
 
         var numberingDefinitions = document.MainDocumentPart?.NumberingDefinitionsPart?.Numbering;
         ArgumentNullException.ThrowIfNull(numberingDefinitions);
@@ -244,15 +317,22 @@ public partial class WordPatcher
             .FirstOrDefault(ni => ni.NumberID?.Value == id);
         ArgumentNullException.ThrowIfNull(numberingInstance);
 
+        var abstractNumberingInstance = numberingDefinitions.Descendants<AbstractNum>()
+            .FirstOrDefault(ani => ani.AbstractNumberId == numberingInstance.AbstractNumId?.Val);
+        ArgumentNullException.ThrowIfNull(abstractNumberingInstance);
+        var startValue = abstractNumberingInstance.Descendants<Level>()
+            .FirstOrDefault(lvl => lvl.LevelIndex == level)
+            ?.StartNumberingValue?.Val ?? new Int32Value(1);
+
         var newInstance = (NumberingInstance)numberingInstance.Clone();
         newInstance.NumberID = new Int32Value(numberingDefinitions.Descendants<NumberingInstance>().Count() + 1);
         newInstance.AppendChild(new LevelOverride
         {
-            StartOverrideNumberingValue = new StartOverrideNumberingValue { Val = 1 }
-        }); // TODO: what if it doesn't start with 1?
+            StartOverrideNumberingValue = new StartOverrideNumberingValue { Val = startValue }
+        });
         numberingDefinitions.AppendChild(newInstance);
 
-        return newInstance.NumberID;
+        return new NumberingOptions(newInstance.NumberID.Value, level.Value);
     }
 
     private static (int, int) FindRunIndices(Paragraph paragraph, string placeholder)
@@ -309,4 +389,10 @@ public partial class WordPatcher
 
     [GeneratedRegex(@"\{\{\s*(?:@(?<attribute>[\w-]+)\s+)?(?<name>[\w_\-$@]+)\s*(?::(?<description>[^{}]*))?\s*\}\}")]
     private static partial Regex PlaceholderRegex();
+
+    private record PlaceholderMatch(string Attribute, string Raw, string Name, string Description);
+
+    private record PlaceholderInformation((int, int) RunIndices, Paragraph SourceParagraph);
+
+    private record NumberingOptions(int Id, int Level);
 }

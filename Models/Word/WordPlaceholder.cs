@@ -2,7 +2,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace SimpleOfficePatchers.Models;
+namespace SimpleOfficePatchers.Models.Word;
 
 public enum WordPlaceholderType
 {
