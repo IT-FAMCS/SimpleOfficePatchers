@@ -151,7 +151,7 @@ public partial class WordPatcher
                 body.InsertAfter(ReplaceParagraphText(itemsPlaceholder, $"{{{{@list {itemsIdentifier}}}}}"), parent);
                 body.InsertAfter(ReplaceParagraphText(titlePlaceholder, $"{{{{{titleIdentifier}}}}}"), parent);
 
-                ApplyListPatch(document, FindParagraphsWithPlaceholder(document, itemsIdentifier),
+                ApplyListPatch(document, FindParagraphsWithPlaceholder(document, itemsIdentifier, "list"),
                     new WordListPatch(null, group.Items));
                 ApplyTextPatch(document, FindParagraphsWithPlaceholder(document, titleIdentifier), group.Title);
             }
@@ -303,7 +303,7 @@ public partial class WordPatcher
         return paragraph;
     }
 
-    private static NumberingOptions? CloneNumbering(WordprocessingDocument document, Paragraph source)
+    private static NumberingOptions CloneNumbering(WordprocessingDocument document, Paragraph source)
     {
         // TODO: perhaps don't throw on every failure 😭
         var id = source.ParagraphProperties?.NumberingProperties?.NumberingId?.Val;

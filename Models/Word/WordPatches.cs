@@ -16,7 +16,7 @@ public record WordGroupListItem(WordTextPatch Title, List<WordPatch> Items);
 public record WordGroupListPatch(List<WordGroupListItem> Groups)
     : WordPatch(WordPlaceholderType.GroupedList);
 
-[JsonSourceGenerationOptions(JsonSerializerDefaults.Web, Converters = [typeof(WordPatchJsonConverter)])]
+[JsonSourceGenerationOptions(JsonSerializerDefaults.Web, UseStringEnumConverter = true, Converters = [typeof(WordPatchJsonConverter)])]
 [JsonSerializable(typeof(WordPatch))]
 [JsonSerializable(typeof(Dictionary<string, WordPatch>))]
 internal partial class WordPatchContext : JsonSerializerContext;

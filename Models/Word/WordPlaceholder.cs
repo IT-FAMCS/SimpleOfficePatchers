@@ -13,6 +13,6 @@ public enum WordPlaceholderType
 
 public record WordPlaceholder(string Raw, string Name, string Description, WordPlaceholderType Type);
 
-[JsonSourceGenerationOptions(JsonSerializerDefaults.Web)]
+[JsonSourceGenerationOptions(JsonSerializerDefaults.Web, UseStringEnumConverter = true)]
 [JsonSerializable(typeof(List<WordPlaceholder>))]
 internal partial class WordPlaceholderContext : JsonSerializerContext;
