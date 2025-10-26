@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices.JavaScript;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using DocumentFormat.OpenXml;
@@ -25,8 +26,8 @@ public partial class WordPatcher
         stream.Write(documentBytes);
 
         var document = WordprocessingDocument.Open(stream, true);
-        foreach (var (key, patch) in patches)
-            ApplyPatch(document, key, patch);
+        foreach (var patch in patches)
+            ApplyPatch(document, patch);
 
         document.Dispose();
         return stream.ToArray();
@@ -39,53 +40,37 @@ public partial class WordPatcher
         var body = document.MainDocumentPart?.Document.Body;
         ArgumentNullException.ThrowIfNull(body);
 
-        var result = new List<WordPlaceholder>();
-        var matches = PlaceholderRegex().Matches(body.InnerText).Select(MatchToPlaceholder)
-            .GroupBy(m => m.Name).ToDictionary(grouping => grouping.Key, grouping => grouping.ToList());
-
-        foreach (var (_, placeholders) in matches)
-        {
-            var orderedPlaceholders = placeholders.OrderBy(pm => pm.Attribute).ThenBy(pm => pm.Description).ToList();
-            foreach (var placeholderMatch in orderedPlaceholders) ProcessPlaceholder(placeholderMatch);
-        }
+        var matches = PlaceholderRegex().Matches(body.InnerText).Select(MatchToPlaceholder).ToList();
+        var result = matches.Select(ProcessPlaceholder).Where(pl =>
+                matches.Where(m => m.Name == pl.Name).All(m => string.IsNullOrEmpty(m.Parent)))
+            .ToList();
 
         return JsonSerializer.Serialize(result,
             WordPlaceholderContext.Default.ListWordPlaceholder);
 
-        void ProcessPlaceholder(PlaceholderMatch match)
+        WordPlaceholder ProcessPlaceholder(PlaceholderMatch match)
         {
-            if (result.Any(p => p.Name == match.Name)) return;
+            var children = matches.Where(m => m.Parent == match.Name).Select(ProcessPlaceholder).ToList();
             switch (match.Attribute)
             {
                 case "list":
                 {
-                    result.Add(new WordPlaceholder(match.Raw, match.Name, match.Description, WordPlaceholderType.List));
-                    return;
+                    return new WordPlaceholder(match.ToString(), match.Name, match.Description,
+                        WordPlaceholderType.List, children
+                    );
                 }
-                case "group-title":
+                case "group":
                 {
-                    if (matches.Any(kv => kv.Value.Any(pm => pm.Attribute == "group-items")))
-                        result.Add(new WordPlaceholder($"{{{{{match.Name}}}}}", match.Name, match.Description,
-                            WordPlaceholderType.GroupedList));
-                    else
-                        throw new Exception(
-                            "found a placeholder with @group-title but not an accompanying @group-items");
-                    return;
-                }
-                case "group-items":
-                {
-                    if (matches.Any(kv => kv.Value.Any(pm => pm.Attribute == "group-title")))
-                        result.Add(new WordPlaceholder($"{{{{{match.Name}}}}}", match.Name, match.Description,
-                            WordPlaceholderType.GroupedList));
-                    else
-                        throw new Exception(
-                            "found a placeholder with @group-items but not an accompanying @group-title");
-                    return;
+                    return new WordPlaceholder(match.ToString(), match.Name, match.Description,
+                        WordPlaceholderType.Group,
+                        children);
                 }
                 case "":
                 {
-                    result.Add(new WordPlaceholder(match.Raw, match.Name, match.Description, WordPlaceholderType.Text));
-                    return;
+                    if (children.Count != 0) throw new Exception("a text placeholder cannot have children");
+                    return new WordPlaceholder(match.ToString(), match.Name, match.Description,
+                        WordPlaceholderType.Text, children
+                    );
                 }
                 default:
                 {
@@ -95,183 +80,244 @@ public partial class WordPatcher
         }
     }
 
-
-    private static void ApplyPatch(WordprocessingDocument document, string key, WordPatch patch)
+    private static void ApplyPatch(WordprocessingDocument document, KeyValuePair<string, WordPatch> patch)
     {
-        switch (patch.Type)
+        switch (patch.Value.Type)
         {
             case WordPlaceholderType.Text:
             {
-                var discriminatedPatch = (WordTextPatch)patch;
-                ApplyTextPatch(document, FindParagraphsWithPlaceholder(document, key), discriminatedPatch);
+                var paragraphs = FindParagraphsWithPlaceholder(document, patch.Key);
+                foreach (var paragraph in paragraphs)
+                    ApplyTextPatch(document, new PatchMetadata(patch.Key, patch.Value, paragraph));
                 break;
             }
             case WordPlaceholderType.List:
             {
-                var discriminatedPatch = (WordListPatch)patch;
-                ApplyListPatch(document, FindParagraphsWithPlaceholder(document, key, "list"), discriminatedPatch);
+                var paragraphs = FindParagraphsWithPlaceholder(document, patch.Key, "list");
+                foreach (var metadata in paragraphs.SelectMany(paragraph => CopyPatch(document,
+                             new PatchMetadata(patch.Key, patch.Value, paragraph),
+                             null,
+                             paragraph.SourceParagraph, true)))
+                    ApplyListPatch(document, metadata);
+
                 break;
             }
-            case WordPlaceholderType.GroupedList:
+            case WordPlaceholderType.Group:
             {
-                var discriminatedPatch = (WordGroupListPatch)patch;
-                ApplyGroupedListPatch(document, FindParagraphsWithPlaceholder(document, key, "group-title"),
-                    FindParagraphsWithPlaceholder(document, key, "group-items"), discriminatedPatch);
+                var paragraphs = FindParagraphsWithPlaceholder(document, patch.Key, "group");
+                foreach (var metadata in paragraphs.SelectMany(paragraph => CopyPatch(document,
+                             new PatchMetadata(patch.Key, patch.Value, paragraph),
+                             null,
+                             paragraph.SourceParagraph, true)))
+                    ApplyGroupPatch(document, metadata);
+
                 break;
+            }
+            default:
+                throw new ArgumentOutOfRangeException();
+        }
+
+        foreach (var paragraph in GetAllParagraphs(document, patch).Distinct())
+            paragraph.Remove();
+    }
+
+    private static void ApplyTextPatch(WordprocessingDocument document, PatchMetadata metadata)
+    {
+        var text = ((WordTextPatch)metadata.Patch).Text;
+        var body = document.GetBodyOrThrow();
+
+        (metadata.Information.SourceParagraph.Parent ?? body).ReplaceChild(
+            ReplaceParagraphText(metadata.Information, text),
+            metadata.Information.SourceParagraph);
+    }
+
+    private static void ApplyListPatch(WordprocessingDocument document, PatchMetadata metadata)
+    {
+        var listPatch = (WordListPatch)metadata.Patch;
+        var length = listPatch.Items.Values.First().Count;
+        for (var index = 0; index < length; index++)
+        {
+            foreach (var key in listPatch.Items.Keys)
+            {
+                var item = listPatch.Items[key][index];
+                var meta = (PatchMetadata)item.Meta;
+                switch (item.Type)
+                {
+                    case WordPlaceholderType.Text: ApplyTextPatch(document, meta); break;
+                    case WordPlaceholderType.List: ApplyListPatch(document, meta); break;
+                    case WordPlaceholderType.Group: ApplyGroupPatch(document, meta); break;
+                    default:
+                        throw new ArgumentOutOfRangeException();
+                }
+            }
+        }
+
+        metadata.Information.SourceParagraph.Remove();
+    }
+
+    private static void ApplyGroupPatch(WordprocessingDocument document, PatchMetadata metadata)
+    {
+        var groupPatch = (WordGroupPatch)metadata.Patch;
+        var group = groupPatch.Groups.First();
+        var body = document.GetBodyOrThrow();
+
+        var title = ReplaceParagraphText(metadata.Information, group.Title.Text);
+        (metadata.Information.SourceParagraph.Parent ?? body).ReplaceChild(title, metadata.Information.SourceParagraph);
+        if (string.IsNullOrEmpty(group.Title.Text)) title.Remove();
+
+        foreach (var (_, item) in group.Items)
+        {
+            var meta = (PatchMetadata)item.Meta;
+            switch (item.Type)
+            {
+                case WordPlaceholderType.Text: ApplyTextPatch(document, meta); break;
+                case WordPlaceholderType.List: ApplyListPatch(document, meta); break;
+                case WordPlaceholderType.Group: ApplyGroupPatch(document, meta); break;
+                default:
+                    throw new ArgumentOutOfRangeException();
+            }
+        }
+    }
+
+    private record PatchMetadata(string Key, WordPatch Patch, PlaceholderInformation Information);
+
+    private static List<Paragraph> GetAllParagraphs(WordprocessingDocument document,
+        KeyValuePair<string, WordPatch> patch)
+    {
+        var result = new List<Paragraph>();
+        result.AddRange(FindParagraphsWithPlaceholder(document, patch.Key).Select(pi => pi.SourceParagraph));
+        switch (patch.Value.Type)
+        {
+            case WordPlaceholderType.Text:
+                return result;
+            case WordPlaceholderType.List:
+            {
+                result.AddRange(((WordListPatch)patch.Value).Items.SelectMany(p =>
+                    p.Value.SelectMany(v =>
+                        GetAllParagraphs(document, new KeyValuePair<string, WordPatch>(p.Key, v)))));
+                return result;
+            }
+            case WordPlaceholderType.Group:
+            {
+                result.AddRange(((WordGroupPatch)patch.Value).Groups.SelectMany(g =>
+                    g.Items.SelectMany(p =>
+                        GetAllParagraphs(document, p))));
+                return result;
             }
             default:
                 throw new ArgumentOutOfRangeException();
         }
     }
 
-    private static void ApplyGroupedListPatch(WordprocessingDocument document,
-        List<PlaceholderInformation> titlePlaceholders, List<PlaceholderInformation> itemsPlaceholders,
-        WordGroupListPatch patch)
+    private static List<PatchMetadata> CopyPatch(WordprocessingDocument document,
+        PatchMetadata patch,
+        string parent,
+        Paragraph where,
+        bool before, string suffix = "_copy", NumberingOptions numberingOptions = null)
     {
-        if (patch.Groups.Count == 0) return;
-        ArgumentNullException.ThrowIfNull(titlePlaceholders);
-        ArgumentNullException.ThrowIfNull(itemsPlaceholders);
-        if (titlePlaceholders.Count != itemsPlaceholders.Count)
-            throw new Exception(
-                $"the amount of @group-title and @group-items placeholders must match! (got {titlePlaceholders.Count} =/= ${itemsPlaceholders.Count})");
-
         var body = document.GetBodyOrThrow();
-        for (var placeholdersIndex = 0; placeholdersIndex < titlePlaceholders.Count; placeholdersIndex++)
-        {
-            var titlePlaceholder = titlePlaceholders[placeholdersIndex];
-            var itemsPlaceholder = itemsPlaceholders[placeholdersIndex];
 
-            var parent = LaterParagraph(body, titlePlaceholder.SourceParagraph, itemsPlaceholder.SourceParagraph);
-            for (var groupIndex = patch.Groups.Count - 1; groupIndex >= 0; groupIndex--)
+        PatchMetadata GetPatchMetadata(string overrideSuffix = "")
+        {
+            var newKey = patch.Information.Match.Name +
+                         (string.IsNullOrEmpty(overrideSuffix) ? suffix : overrideSuffix);
+            var updatedMatch = patch.Information.Match with { Name = newKey, Parent = parent };
+            var newParagraph = before
+                ? body.InsertBefore(ReplaceParagraphText(patch.Information, updatedMatch.ToString(), numberingOptions),
+                    where)
+                : body.InsertAfter(ReplaceParagraphText(patch.Information, updatedMatch.ToString(), numberingOptions),
+                    where);
+            return patch with
             {
-                var group = patch.Groups[groupIndex];
-                var itemsIdentifier = TemporaryGroupedListPlaceholder("items", groupIndex);
-                var titleIdentifier = TemporaryGroupedListPlaceholder("title", groupIndex);
-
-                body.InsertAfter(ReplaceParagraphText(itemsPlaceholder, $"{{{{@list {itemsIdentifier}}}}}"), parent);
-                body.InsertAfter(ReplaceParagraphText(titlePlaceholder, $"{{{{{titleIdentifier}}}}}"), parent);
-
-                ApplyListPatch(document, FindParagraphsWithPlaceholder(document, itemsIdentifier, "list"),
-                    new WordListPatch(null, group.Items));
-                ApplyTextPatch(document, FindParagraphsWithPlaceholder(document, titleIdentifier), group.Title);
-            }
-
-            body.RemoveChild(titlePlaceholder.SourceParagraph);
-            body.RemoveChild(itemsPlaceholder.SourceParagraph);
+                Key = newKey,
+                Information = new PlaceholderInformation(Match: updatedMatch,
+                    RunIndices: FindRunIndices(newParagraph, updatedMatch.ToString()),
+                    SourceParagraph: newParagraph),
+            };
         }
 
-        return;
-
-        string TemporaryGroupedListPlaceholder(string purpose, int index)
+        switch (patch.Patch.Type)
         {
-            return $"__grouped_list_${index}_{purpose}__";
-        }
-    }
-
-    private static void ApplyListPatch(WordprocessingDocument document,
-        List<PlaceholderInformation> placeholdersInformation,
-        WordListPatch patch)
-    {
-        if (patch.Items.Count == 0) return;
-        ArgumentNullException.ThrowIfNull(placeholdersInformation);
-
-        var body = document.GetBodyOrThrow();
-        foreach (var placeholderInformation in placeholdersInformation)
-        {
-            var parent = placeholderInformation.SourceParagraph;
-            var numbering = CloneNumbering(document, parent);
-            ArgumentNullException.ThrowIfNull(numbering); // TODO: provide more information
-
-            foreach (var (index, item) in patch.Items.AsEnumerable().Reverse().Index())
-                switch (item.Type)
+            case WordPlaceholderType.Text: return [GetPatchMetadata()];
+            case WordPlaceholderType.List:
+            {
+                var listPatch = (WordListPatch)patch.Patch;
+                var patchMetadata = GetPatchMetadata();
+                var listNumberingOptions = CloneNumbering(document, patchMetadata.Information.SourceParagraph);
+                var copiedItems = new Dictionary<string, List<WordPatch>>();
+                for (var index = listPatch.Items.Values.First().Count - 1; index >= 0; index--)
                 {
-                    case WordPlaceholderType.Text:
+                    var listSuffix = "_copy_list_" + index;
+                    foreach (var key in listPatch.Items.Keys)
                     {
-                        var discriminatedItem = (WordTextPatch)item;
-
-                        var newParagraph =
-                            ReplaceParagraphText(placeholderInformation, discriminatedItem.Text, numbering);
-                        body.InsertAfter(newParagraph, parent);
-                        break;
-                    }
-                    case WordPlaceholderType.List:
-                    {
-                        var discriminatedItem = (WordListPatch)item;
-
-                        var listIdentifier = TemporaryListPlaceholder(index);
-                        body.InsertAfter(ReplaceParagraphText(placeholderInformation,
-                            $"{{{{@list {listIdentifier}}}}}", numbering with { Level = numbering.Level + 1 }), parent);
-                        ApplyPatch(document, listIdentifier, discriminatedItem);
-
-                        if (discriminatedItem.SublistTitle != null)
+                        if (!copiedItems.ContainsKey(key)) copiedItems[key] = [];
+                        var paragraphs = FindParagraphsWithPlaceholder(document, key);
+                        foreach (var paragraph in paragraphs.AsEnumerable().Reverse())
                         {
-                            var sublistTitleParagraph = ReplaceParagraphText(placeholderInformation,
-                                discriminatedItem.SublistTitle.Text, numbering);
-                            body.InsertAfter(sublistTitleParagraph, parent);
+                            var copies = CopyPatch(document,
+                                new PatchMetadata(key, listPatch.Items[key][index], paragraph),
+                                patchMetadata.Key,
+                                patchMetadata.Information.SourceParagraph,
+                                false, listSuffix, listNumberingOptions);
+                            foreach (var copy in copies) copiedItems[key].Add(copy.Patch with { Meta = copy });
                         }
-
-                        break;
                     }
-                    case WordPlaceholderType.GroupedList:
-                    {
-                        var discriminatedItem = (WordGroupListPatch)item;
-
-                        var listIdentifier = TemporaryListPlaceholder(index);
-                        body.InsertAfter(
-                            ReplaceParagraphText(placeholderInformation, $"{{{{@group-title {listIdentifier}}}}}",
-                                numbering),
-                            parent);
-                        body.InsertAfter(ReplaceParagraphText(placeholderInformation,
-                                $"{{{{@group-items {listIdentifier}}}}}",
-                                numbering with { Level = numbering.Level + 1 }),
-                            parent);
-                        ApplyPatch(document, listIdentifier, discriminatedItem);
-                        break;
-                    }
-                    default:
-                        throw new ArgumentOutOfRangeException();
                 }
 
-            body.RemoveChild(parent);
-        }
+                return [patchMetadata with { Patch = listPatch with { Items = copiedItems } }];
+            }
+            case WordPlaceholderType.Group:
+            {
+                var groupPatch = (WordGroupPatch)patch.Patch;
+                var patchMetadatas = new List<PatchMetadata>();
+                foreach (var (index, group) in groupPatch.Groups.AsEnumerable().Index())
+                {
+                    var groupSuffix = "_copy_group_" + index;
+                    var patchMetadata = GetPatchMetadata(groupSuffix);
+                    var copiedItems = new Dictionary<string, WordPatch>();
+                    foreach (var (key, value) in group.Items)
+                    {
+                        var paragraphs = FindParagraphsWithPlaceholder(document, key);
+                        foreach (var paragraph in paragraphs.AsEnumerable().Reverse())
+                        {
+                            var copies = CopyPatch(document, new PatchMetadata(key, value, paragraph),
+                                patchMetadata.Key,
+                                patchMetadata.Information.SourceParagraph,
+                                false, groupSuffix);
+                            foreach (var copy in copies) copiedItems[copy.Key] = copy.Patch with { Meta = copy };
+                        }
+                    }
 
-        return;
+                    patchMetadatas.Add(patchMetadata with
+                    {
+                        Patch = groupPatch with { Groups = [group with { Items = copiedItems }] }
+                    });
+                }
 
-        string TemporaryListPlaceholder(int index)
-        {
-            return $"__list_${index}__";
-        }
-    }
-
-    private static void ApplyTextPatch(WordprocessingDocument document,
-        List<PlaceholderInformation> placeholdersInformation,
-        WordTextPatch patch)
-    {
-        ArgumentNullException.ThrowIfNull(placeholdersInformation);
-
-        foreach (var placeholderInformation in placeholdersInformation)
-        {
-            var newParagraph = ReplaceParagraphText(placeholderInformation, patch.Text);
-            document.GetBodyOrThrow().ReplaceChild(newParagraph, placeholderInformation.SourceParagraph);
+                return patchMetadatas;
+            }
+            default:
+                throw new ArgumentOutOfRangeException();
         }
     }
 
     private static List<PlaceholderInformation> FindParagraphsWithPlaceholder(WordprocessingDocument document,
-        string name, string attribute = "")
+        string name, string attribute = null, string parent = null)
     {
         var body = document.GetBodyOrThrow();
-        var result = new List<PlaceholderInformation>();
-        foreach (var child in body.ChildElements)
-        {
-            if (child is not Paragraph paragraph || !PlaceholderRegex().IsMatch(paragraph.InnerText)) continue;
 
-            var exactMatch = PlaceholderRegex().Matches(paragraph.InnerText).Select(MatchToPlaceholder)
-                .FirstOrDefault(m => m.Name == name && m.Attribute == attribute);
-            if (exactMatch != null)
-                result.Add(new PlaceholderInformation(FindRunIndices(paragraph, exactMatch.Raw), paragraph));
-        }
-
-        return result;
+        return (from paragraph in body.Descendants<Paragraph>()
+                where PlaceholderRegex().IsMatch(paragraph.InnerText)
+                let exactMatch = PlaceholderRegex()
+                    .Matches(paragraph.InnerText)
+                    .Select(MatchToPlaceholder)
+                    .FirstOrDefault(m =>
+                        m.Name == name && (parent == null || m.Parent == parent) &&
+                        (attribute == null || m.Attribute == attribute))
+                where exactMatch != null
+                select new PlaceholderInformation(FindRunIndices(paragraph, exactMatch.ToString()), paragraph,
+                    exactMatch))
+            .ToList();
     }
 
     private static Paragraph ReplaceParagraphText(PlaceholderInformation placeholderInformation, string with,
@@ -286,7 +332,7 @@ public partial class WordPatcher
 
         var removedRuns = Enumerable.Range(startIndex + 1, endIndex - startIndex)
             .Select(i =>
-                (Run)paragraph.ChildElements[i]);
+                paragraph.ChildElements[i]);
         // i have zero idea why but items have to be removed in reverse for this to work
         foreach (var removedRun in removedRuns.Reverse()) removedRun.Remove();
 
@@ -372,27 +418,36 @@ public partial class WordPatcher
         return (currentStart, currentEnd);
     }
 
-    private static Paragraph LaterParagraph(Body body, Paragraph left, Paragraph right)
-    {
-        var paragraphs = body.Descendants<Paragraph>().ToList();
-        return paragraphs.IndexOf(left) > paragraphs.IndexOf(right) ? left : right;
-    }
 
     private static PlaceholderMatch MatchToPlaceholder(Match match)
     {
         if (!match.Success)
             throw new Exception(
                 "MatchToPlaceholder must be called after verifying that the string matches the regex");
-        return new PlaceholderMatch(match.Groups["attribute"].Value, match.Value, match.Groups["name"].Value,
-            match.Groups["description"].Value);
+        return new PlaceholderMatch(match.Groups["attribute"].Value, match.Groups["name"].Value,
+            match.Groups["description"].Value, match.Groups["parent"].Value);
     }
 
-    [GeneratedRegex(@"\{\{\s*(?:@(?<attribute>[\w-]+)\s+)?(?<name>[\w_\-$@]+)\s*(?::(?<description>[^{}]*))?\s*\}\}")]
+    [GeneratedRegex(
+        @"\{\{\s*(?:>(?<parent>[\w_\-$@]+)\s+)?\s*(?:@(?<attribute>[\w-]+)\s+)?(?<name>[\w_\-$@]+)\s*(?::(?<description>[^{}]*))?\s*\}\}")]
     private static partial Regex PlaceholderRegex();
 
-    private record PlaceholderMatch(string Attribute, string Raw, string Name, string Description);
+    private record PlaceholderMatch(string Attribute, string Name, string Description, string Parent)
+    {
+        public override string ToString()
+        {
+            var sb = new StringBuilder();
+            sb.Append("{{");
+            if (!string.IsNullOrEmpty(Parent)) sb.Append($">{Parent} ");
+            if (!string.IsNullOrEmpty(Attribute)) sb.Append($"@{Attribute} ");
+            sb.Append(Name);
+            if (!string.IsNullOrEmpty(Description)) sb.Append($": {Description}");
+            sb.Append("}}");
+            return sb.ToString();
+        }
+    }
 
-    private record PlaceholderInformation((int, int) RunIndices, Paragraph SourceParagraph);
+    private record PlaceholderInformation((int, int) RunIndices, Paragraph SourceParagraph, PlaceholderMatch Match);
 
     private record NumberingOptions(int Id, int Level);
 }

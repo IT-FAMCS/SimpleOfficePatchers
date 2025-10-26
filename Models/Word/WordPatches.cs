@@ -4,19 +4,20 @@ using System.Text.Json.Serialization;
 
 namespace SimpleOfficePatchers.Models.Word;
 
-public abstract record WordPatch(WordPlaceholderType Type);
+public abstract record WordPatch(WordPlaceholderType Type, [property: JsonIgnore] object Meta = null);
 
 public record WordTextPatch(string Text) : WordPatch(WordPlaceholderType.Text);
 
-public record WordListPatch(WordTextPatch SublistTitle, List<WordPatch> Items)
+public record WordListPatch(Dictionary<string, List<WordPatch>> Items)
     : WordPatch(WordPlaceholderType.List);
 
-public record WordGroupListItem(WordTextPatch Title, List<WordPatch> Items);
+public record WordGroupItem(WordTextPatch Title, Dictionary<string, WordPatch> Items);
 
-public record WordGroupListPatch(List<WordGroupListItem> Groups)
-    : WordPatch(WordPlaceholderType.GroupedList);
+public record WordGroupPatch(List<WordGroupItem> Groups)
+    : WordPatch(WordPlaceholderType.Group);
 
-[JsonSourceGenerationOptions(JsonSerializerDefaults.Web, UseStringEnumConverter = true, Converters = [typeof(WordPatchJsonConverter)])]
+[JsonSourceGenerationOptions(JsonSerializerDefaults.Web, UseStringEnumConverter = true,
+    Converters = [typeof(WordPatchJsonConverter)])]
 [JsonSerializable(typeof(WordPatch))]
 [JsonSerializable(typeof(Dictionary<string, WordPatch>))]
 internal partial class WordPatchContext : JsonSerializerContext;

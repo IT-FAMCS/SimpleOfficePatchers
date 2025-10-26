@@ -8,10 +8,15 @@ public enum WordPlaceholderType
 {
     Text,
     List,
-    GroupedList
+    Group
 }
 
-public record WordPlaceholder(string Raw, string Name, string Description, WordPlaceholderType Type);
+public record WordPlaceholder(
+    string Raw,
+    string Name,
+    string Description,
+    WordPlaceholderType Type,
+    List<WordPlaceholder> Children);
 
 [JsonSourceGenerationOptions(JsonSerializerDefaults.Web, UseStringEnumConverter = true)]
 [JsonSerializable(typeof(List<WordPlaceholder>))]

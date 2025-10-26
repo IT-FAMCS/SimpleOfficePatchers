@@ -24,35 +24,28 @@ public class WordPatchJsonConverter : JsonConverter<WordPatch>
             }
             case WordPlaceholderType.List:
             {
-                WordTextPatch sublistTitle = null;
-                if (doc.RootElement.TryGetProperty("sublistTitle", out var rawSublistTitle))
-                {
-                    var patch = JsonSerializer.Deserialize(rawSublistTitle.GetRawText(),
-                        WordPatchContext.Default.WordPatch);
-                    if (patch.Type != WordPlaceholderType.Text) throw new JsonException();
-                    sublistTitle = (WordTextPatch)patch;
-                }
-
-                var items = doc.RootElement.GetProperty("items").EnumerateArray()
-                    .Select(obj => JsonSerializer.Deserialize(obj.GetRawText(), WordPatchContext.Default.WordPatch))
-                    .ToList();
-                return new WordListPatch(sublistTitle, items);
+                var items = doc.RootElement.GetProperty("items").EnumerateObject()
+                    .ToDictionary(obj => obj.Name,
+                        obj => obj.Value.EnumerateArray().Select(obj2 =>
+                                JsonSerializer.Deserialize(obj2.GetRawText(), WordPatchContext.Default.WordPatch))
+                            .ToList());
+                return new WordListPatch(items);
             }
-            case WordPlaceholderType.GroupedList:
+            case WordPlaceholderType.Group:
             {
                 var groups = doc.RootElement.GetProperty("groups").EnumerateArray()
                     .Select(obj =>
                     {
                         var title = JsonSerializer.Deserialize(obj.GetProperty("title").GetRawText(),
                             WordPatchContext.Default.WordPatch);
-                        var items = obj.GetProperty("items").EnumerateArray()
-                            .Select(item =>
-                                JsonSerializer.Deserialize(item.GetRawText(), WordPatchContext.Default.WordPatch))
-                            .ToList();
+                        var items = obj.GetProperty("items").EnumerateObject()
+                            .ToDictionary(obj2 => obj2.Name,
+                                obj2 => JsonSerializer.Deserialize(obj2.Value.GetRawText(),
+                                    WordPatchContext.Default.WordPatch));
                         if (title.Type != WordPlaceholderType.Text) throw new JsonException();
-                        return new WordGroupListItem((WordTextPatch)title, items);
+                        return new WordGroupItem((WordTextPatch)title, items);
                     }).ToList();
-                return new WordGroupListPatch(groups);
+                return new WordGroupPatch(groups);
             }
             default:
                 throw new ArgumentOutOfRangeException();
@@ -74,12 +67,6 @@ public class WordPatchJsonConverter : JsonConverter<WordPatch>
             case WordPlaceholderType.List:
             {
                 var discriminatedPatch = (WordListPatch)value;
-                if (discriminatedPatch.SublistTitle != null)
-                {
-                    writer.WritePropertyName("sublistTitle");
-                    JsonSerializer.Serialize(writer, discriminatedPatch.SublistTitle,
-                        WordPatchContext.Default.WordPatch);
-                }
 
                 writer.WriteStartArray("items");
                 foreach (var item in discriminatedPatch.Items)
@@ -87,9 +74,9 @@ public class WordPatchJsonConverter : JsonConverter<WordPatch>
                 writer.WriteEndArray();
                 break;
             }
-            case WordPlaceholderType.GroupedList:
+            case WordPlaceholderType.Group:
             {
-                var discriminatedPatch = (WordGroupListPatch)value;
+                var discriminatedPatch = (WordGroupPatch)value;
 
                 writer.WriteStartArray("groups");
                 foreach (var group in discriminatedPatch.Groups)
