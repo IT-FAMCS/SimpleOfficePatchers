@@ -270,7 +270,9 @@ public partial class WordPatcher
             {
                 var groupPatch = (WordGroupPatch)patch.Patch;
                 var patchMetadatas = new List<PatchMetadata>();
-                foreach (var (index, group) in groupPatch.Groups.AsEnumerable().Index())
+                var groups = groupPatch.Groups;
+                if (!before) groups.Reverse();
+                foreach (var (index, group) in groups.Index())
                 {
                     var groupSuffix = "_copy_group_" + index;
                     var patchMetadata = GetPatchMetadata(groupSuffix);
@@ -278,7 +280,7 @@ public partial class WordPatcher
                     foreach (var (key, value) in group.Items)
                     {
                         var paragraphs = FindParagraphsWithPlaceholder(document, key);
-                        foreach (var paragraph in paragraphs.AsEnumerable().Reverse())
+                        foreach (var paragraph in paragraphs)
                         {
                             var copies = CopyPatch(document, new PatchMetadata(key, value, paragraph),
                                 patchMetadata.Key,
